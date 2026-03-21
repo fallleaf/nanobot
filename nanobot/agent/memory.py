@@ -170,24 +170,14 @@ Call save_memory tool with your consolidation now."""
         ]
 
         try:
-            forced = {"type": "function", "function": {"name": "save_memory"}}
+            # Use "auto" mode for compatibility with Qwen3.5 and other providers
+            # that don't support forced tool_choice (only ["none", "auto"])
             response = await provider.chat_with_retry(
                 messages=chat_messages,
                 tools=_SAVE_MEMORY_TOOL,
                 model=model,
-                tool_choice=forced,
+                tool_choice="auto",
             )
-
-            if response.finish_reason == "error" and _is_tool_choice_unsupported(
-                response.content
-            ):
-                logger.warning("Forced tool_choice unsupported, retrying with auto")
-                response = await provider.chat_with_retry(
-                    messages=chat_messages,
-                    tools=_SAVE_MEMORY_TOOL,
-                    model=model,
-                    tool_choice="auto",
-                )
 
             if not response.has_tool_calls:
                 logger.warning(
