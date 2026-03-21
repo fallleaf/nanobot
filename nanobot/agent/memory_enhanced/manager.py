@@ -251,6 +251,7 @@ class MemoryManager:
         query: str,
         hours: int = 24,
         channel: Optional[str] = None,
+        tags: Optional[List[str]] = None,
         limit: int = 20
     ) -> List[Dict[str, Any]]:
         """
@@ -260,6 +261,7 @@ class MemoryManager:
             query: 搜索词
             hours: 最近 N 小时
             channel: 频道过滤
+            tags: 标签过滤
             limit: 最大返回数量
             
         Returns:
@@ -269,6 +271,7 @@ class MemoryManager:
             query=query,
             hours=hours,
             channel=channel,
+            tags=tags,
             limit=limit
         )
         

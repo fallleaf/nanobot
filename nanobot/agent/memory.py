@@ -7,7 +7,7 @@ import json
 import weakref
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, List, Optional
 
 from loguru import logger
 
@@ -144,7 +144,7 @@ class MemoryStore:
             logger.warning(f"Enhanced memory not available: {e}")
             logger.warning("Falling back to standard file-based memory")
     
-    def _on_enhanced_consolidate(self, summary: dict, items: list):
+    def _on_enhanced_consolidate(self, summary: Dict[str, Any], items: List[Any]):
         """增强记忆巩固回调 - 写入长期记忆"""
         if summary and "summary" in summary:
             entry = summary["summary"]
@@ -175,6 +175,7 @@ class MemoryStore:
         channel: str = "telegram",
         chat_id: str = "",
         importance: Optional[float] = None,
+        auto_extract_tags: bool = True,
     ) -> dict:
         """
         编码消息到增强记忆系统
@@ -185,6 +186,7 @@ class MemoryStore:
             channel: 频道
             chat_id: 聊天 ID
             importance: 重要性 (0-1, 自动计算如果为 None)
+            auto_extract_tags: 是否自动提取标签
         
         Returns:
             编码结果
@@ -197,12 +199,18 @@ class MemoryStore:
             if importance is None:
                 importance = self._calculate_importance(content, role)
             
+            # 自动提取标签
+            tags = []
+            if auto_extract_tags:
+                tags = self._extract_tags(content, role)
+            
             # 编码到工作记忆和短期记忆
             result = self.manager.encode(
                 content=content,
                 channel=f"{channel}_{chat_id}" if chat_id else channel,
                 role=role,
                 importance=importance,
+                tags=tags,
                 add_to_working=True,
                 add_to_short_term=True
             )
@@ -244,6 +252,56 @@ class MemoryStore:
             importance += 0.1
         
         return min(importance, 1.0)
+    
+    def _extract_tags(self, content: str, role: str) -> List[str]:
+        """
+        从内容中自动提取标签
+        
+        Args:
+            content: 消息内容
+            role: 角色 (user/assistant)
+            
+        Returns:
+            标签列表 (最多 6 个)
+        """
+        tags = []
+        content_lower = content.lower()
+        
+        # 角色标签
+        tags.append(f"from_{role}")
+        
+        # 内容类型标签
+        if "?" in content or "？" in content:
+            tags.append("question")
+        
+        # 关键词标签
+        tag_keywords = {
+            "配置": ["配置", "config", "设置", "setup"],
+            "错误": ["错误", "error", "失败", "fail", "bug"],
+            "重要": ["重要", "必须", "记住", "注意", "critical"],
+            "命令": ["/"],
+            "技术": ["代码", "code", "python", "sql", "api", "数据库"],
+            "项目": ["项目", "project", "nanobot", "memory"],
+            "工作": ["工作", "work", "会议", "任务"],
+            "查询": ["查询", "搜索", "find", "search", "查看"],
+        }
+        
+        for tag, keywords in tag_keywords.items():
+            if any(kw in content_lower for kw in keywords):
+                tags.append(tag)
+                if len(tags) >= 6:  # 限制标签数量
+                    break
+        
+        # 时间标签
+        hour = datetime.now().hour
+        if 6 <= hour < 12:
+            tags.append("morning")
+        elif 12 <= hour < 18:
+            tags.append("afternoon")
+        else:
+            tags.append("evening")
+        
+        return tags
     
     async def _maybe_auto_consolidate(self):
         """检查是否需要自动巩固"""
@@ -298,19 +356,63 @@ class MemoryStore:
             
             # 搜索相关记忆
             if query and self.short_term:
-                search_results = self.manager.search(query, hours=24, limit=3)
+                # 从查询中提取相关标签
+                relevant_tags = self._extract_query_tags(query)
+                
+                # 优先按标签搜索，其次按关键词搜索
+                if relevant_tags:
+                    search_results = self.manager.search(
+                        query=query,
+                        tags=relevant_tags,
+                        hours=24,
+                        limit=3
+                    )
+                else:
+                    search_results = self.manager.search(query, hours=24, limit=3)
+                
                 if search_results:
                     context += "\n\n## 相关记忆\n"
                     for r in search_results:
                         content = r.get("content", "")[:100]
                         role = r.get("role", "?")
-                        context += f"- [{role}] {content}\n"
+                        tags = r.get("tags", [])
+                        tag_str = f" [{', '.join(tags)}]" if tags else ""
+                        context += f"- [{role}]{tag_str} {content}\n"
             
             return context if context else ""
             
         except Exception as e:
             logger.warning(f"Failed to get enhanced context: {e}")
             return ""
+    
+    def _extract_query_tags(self, query: str) -> List[str]:
+        """
+        从查询中提取相关标签用于检索
+        
+        Args:
+            query: 查询文本
+            
+        Returns:
+            相关标签列表 (最多 3 个)
+        """
+        tags = []
+        query_lower = query.lower()
+        
+        tag_keywords = {
+            "配置": ["配置", "config", "设置"],
+            "错误": ["错误", "error", "失败"],
+            "命令": ["/"],
+            "技术": ["代码", "code", "python", "sql"],
+            "项目": ["项目", "project", "nanobot"],
+            "查询": ["查询", "搜索", "find", "search"],
+            "question": ["?", "？", "怎么", "如何", "哪里", "什么"],
+        }
+        
+        for tag, keywords in tag_keywords.items():
+            if any(kw in query_lower for kw in keywords):
+                tags.append(tag)
+        
+        return tags[:3]  # 限制最多 3 个标签
     
     def get_enhanced_stats(self) -> dict:
         """获取增强记忆统计信息"""

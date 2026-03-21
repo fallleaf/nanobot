@@ -94,13 +94,20 @@ class ShortTermMemory:
         # 确保目录存在
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # 初始化数据库
+        # 初始化数据库连接
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        
+        # 优化并发性能 (WAL 模式 + 超时)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=5000")
+        
+        # 初始化数据库表
         self._init_db()
     
     def _init_db(self) -> None:
         """初始化数据库表"""
-        conn = sqlite3.connect(str(self.db_path))
-        cursor = conn.cursor()
+        cursor = self.conn.cursor()
         
         # 创建表
         cursor.execute("""
@@ -124,8 +131,7 @@ class ShortTermMemory:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_consolidated ON memory_items(consolidated)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_access_count ON memory_items(access_count)")
         
-        conn.commit()
-        conn.close()
+        self.self.conn.commit()
     
     def add(
         self,
@@ -162,8 +168,8 @@ class ShortTermMemory:
             metadata=metadata or {}
         )
         
-        conn = sqlite3.connect(str(self.db_path))
-        cursor = conn.cursor()
+        cursor = self.conn.cursor()
+        
         
         cursor.execute("""
             INSERT INTO memory_items
@@ -182,8 +188,8 @@ class ShortTermMemory:
             json.dumps(item.metadata)
         ))
         
-        conn.commit()
-        conn.close()
+        self.conn.commit()
+        
         
         # 检查是否需要清理
         self._maybe_cleanup()
@@ -207,8 +213,8 @@ class ShortTermMemory:
         Returns:
             记忆项列表 (按时间倒序)
         """
-        conn = sqlite3.connect(str(self.db_path))
-        cursor = conn.cursor()
+        cursor = self.conn.cursor()
+        
         
         cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
         
@@ -227,7 +233,7 @@ class ShortTermMemory:
         
         cursor.execute(query, params)
         rows = cursor.fetchall()
-        conn.close()
+        
         
         items = []
         for row in rows:
@@ -252,6 +258,7 @@ class ShortTermMemory:
         query: str,
         hours: int = 24,
         channel: Optional[str] = None,
+        tags: Optional[List[str]] = None,
         limit: int = 20
     ) -> List[ShortTermMemoryItem]:
         """
@@ -261,6 +268,7 @@ class ShortTermMemory:
             query: 搜索词
             hours: 最近 N 小时
             channel: 频道过滤
+            tags: 标签过滤 (包含任一标签即可)
             limit: 最大返回数量
             
         Returns:
@@ -272,10 +280,17 @@ class ShortTermMemory:
         matches = []
         
         for item in items:
-            if query_lower in item.content.lower():
+            # 内容匹配
+            content_match = query_lower in item.content.lower()
+            # 标签匹配 (如果指定了 tags)
+            tag_match = not tags or any(t in item.tags for t in tags)
+            
+            if content_match or tag_match:
                 # 更新访问统计
                 item.access_count += 1
                 item.last_access = datetime.now()
+                # 计算匹配得分
+                item._match_type = "tag" if tag_match and not content_match else "content"
                 matches.append(item)
         
         # 按相关性排序 (简单关键词匹配 + 时间衰减)
@@ -294,8 +309,8 @@ class ShortTermMemory:
     
     def get_unconsolidated(self, limit: int = 100) -> List[ShortTermMemoryItem]:
         """获取未巩固的记忆项"""
-        conn = sqlite3.connect(str(self.db_path))
-        cursor = conn.cursor()
+        cursor = self.conn.cursor()
+        
         
         cursor.execute("""
             SELECT * FROM memory_items
@@ -305,7 +320,7 @@ class ShortTermMemory:
         """, (limit,))
         
         rows = cursor.fetchall()
-        conn.close()
+        
         
         items = []
         for row in rows:
@@ -338,8 +353,8 @@ class ShortTermMemory:
         if not ids:
             return 0
         
-        conn = sqlite3.connect(str(self.db_path))
-        cursor = conn.cursor()
+        cursor = self.conn.cursor()
+        
         
         placeholders = ','.join('?' * len(ids))
         cursor.execute(f"""
@@ -349,21 +364,21 @@ class ShortTermMemory:
         """, ids)
         
         count = cursor.rowcount
-        conn.commit()
-        conn.close()
+        self.conn.commit()
+        
         
         return count
     
     def delete(self, item_id: str) -> bool:
         """删除记忆项"""
-        conn = sqlite3.connect(str(self.db_path))
-        cursor = conn.cursor()
+        cursor = self.conn.cursor()
+        
         
         cursor.execute("DELETE FROM memory_items WHERE id = ?", (item_id,))
         
         deleted = cursor.rowcount > 0
-        conn.commit()
-        conn.close()
+        self.conn.commit()
+        
         
         return deleted
     
@@ -376,8 +391,8 @@ class ShortTermMemory:
         Returns:
             删除的数量
         """
-        conn = sqlite3.connect(str(self.db_path))
-        cursor = conn.cursor()
+        cursor = self.conn.cursor()
+        
         
         # 获取所有记忆项
         cursor.execute("SELECT * FROM memory_items ORDER BY timestamp ASC")
@@ -407,15 +422,15 @@ class ShortTermMemory:
             cursor.execute(f"DELETE FROM memory_items WHERE id IN ({placeholders})", to_delete)
         
         count = len(to_delete)
-        conn.commit()
-        conn.close()
+        self.conn.commit()
+        
         
         return count
     
     def get_stats(self) -> Dict[str, Any]:
         """获取统计信息"""
-        conn = sqlite3.connect(str(self.db_path))
-        cursor = conn.cursor()
+        cursor = self.conn.cursor()
+        
         
         # 总数
         cursor.execute("SELECT COUNT(*) FROM memory_items")
@@ -435,7 +450,7 @@ class ShortTermMemory:
         oldest = row[0]
         newest = row[1]
         
-        conn.close()
+        
         
         return {
             "total": total,
@@ -461,8 +476,8 @@ class ShortTermMemory:
         if not items:
             return
         
-        conn = sqlite3.connect(str(self.db_path))
-        cursor = conn.cursor()
+        cursor = self.conn.cursor()
+        
         
         for item in items:
             cursor.execute("""
@@ -471,20 +486,20 @@ class ShortTermMemory:
                 WHERE id = ?
             """, (item.access_count, item.last_access.isoformat(), item.id))
         
-        conn.commit()
-        conn.close()
+        self.conn.commit()
+        
     
     def clear(self) -> int:
         """清空所有记忆"""
-        conn = sqlite3.connect(str(self.db_path))
-        cursor = conn.cursor()
+        cursor = self.conn.cursor()
+        
         
         cursor.execute("SELECT COUNT(*) FROM memory_items")
         count = cursor.fetchone()[0]
         
         cursor.execute("DELETE FROM memory_items")
-        conn.commit()
-        conn.close()
+        self.conn.commit()
+        
         
         return count
     
