@@ -95,6 +95,7 @@ class MemoryStore:
         self.short_term = None
         self.working = None
         self.manager = None
+        self.graph = None  # 知识图谱
         self._enhanced_stats = {
             "encoded_count": 0,
             "consolidated_count": 0,
@@ -113,6 +114,7 @@ class MemoryStore:
             from nanobot.agent.memory_enhanced.short_term import ShortTermMemory
             from nanobot.agent.memory_enhanced.working import WorkingMemory
             from nanobot.agent.memory_enhanced.manager import MemoryManager
+            from nanobot.agent.memory_enhanced.graph_memory import GraphMemory
             
             # 数据库路径：统一使用 memory/ 目录
             db_path = self.memory_dir / "short_term_memory.db"
@@ -143,7 +145,11 @@ class MemoryStore:
                 consolidation_callback=self._on_enhanced_consolidate
             )
             
-            logger.info("Enhanced memory system initialized (SQLite + Working)")
+            # 初始化知识图谱
+            graph_db_path = self.memory_dir / "graph_memory.db"
+            self.graph = GraphMemory(db_path=graph_db_path)
+            
+            logger.info("Enhanced memory system initialized (SQLite + Working + Graph)")
         except Exception as e:
             logger.warning(f"Enhanced memory not available: {e}")
             logger.warning("Falling back to standard file-based memory")
@@ -459,6 +465,9 @@ class MemoryStore:
             # 巩固统计
             consolidated_count = self._get_consolidated_count()
             
+            # 知识图谱统计
+            graph_stats = self._get_graph_stats()
+            
             stats = {
                 "short_term_count": short_term_count,
                 "working_count": working_count,
@@ -468,6 +477,7 @@ class MemoryStore:
                 "database_size_kb": round(db_size / 1024, 2),
                 "consolidated_count": consolidated_count,
                 "unconsolidated_count": short_term_count - consolidated_count,
+                "graph": graph_stats,
             }
             
             # 更新缓存
@@ -553,6 +563,134 @@ class MemoryStore:
         except Exception as e:
             logger.warning(f"Failed to get consolidated count: {e}")
             return 0
+    
+    def _get_graph_stats(self) -> Dict[str, Any]:
+        """获取知识图谱统计信息"""
+        if not self.graph:
+            return {"available": False}
+        
+        try:
+            stats = self.graph.get_stats()
+            return {
+                "available": True,
+                "entity_count": stats.get("entity_count", 0),
+                "relation_count": stats.get("relation_count", 0),
+                "entity_types": stats.get("entity_types", {}),
+            }
+        except Exception as e:
+            logger.warning(f"Failed to get graph stats: {e}")
+            return {"available": False, "error": str(e)}
+    
+    def add_entity(
+        self,
+        name: str,
+        type: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> Optional[str]:
+        """
+        添加实体到知识图谱
+        
+        Args:
+            name: 实体名称
+            type: 实体类型 (person/project/config/technology/organization)
+            metadata: 元数据
+            
+        Returns:
+            实体 ID，失败返回 None
+        """
+        if not self.graph:
+            return None
+        
+        try:
+            import uuid
+            from nanobot.agent.memory_enhanced.graph_memory import Entity
+            
+            entity = Entity(
+                id=str(uuid.uuid4()),
+                name=name,
+                type=type,
+                metadata=metadata or {}
+            )
+            success = self.graph.add_entity(entity)
+            if success:
+                logger.debug(f"Added entity: {name} ({type})")
+                return entity.id
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to add entity: {e}")
+            return None
+    
+    def add_relation(
+        self,
+        source_id: str,
+        target_id: str,
+        type: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        添加关系到知识图谱
+        
+        Args:
+            source_id: 源实体 ID
+            target_id: 目标实体 ID
+            type: 关系类型
+            metadata: 元数据
+            
+        Returns:
+            是否成功
+        """
+        if not self.graph:
+            return False
+        
+        try:
+            import uuid
+            from nanobot.agent.memory_enhanced.graph_memory import Relation
+            
+            relation = Relation(
+                id=str(uuid.uuid4()),
+                source=source_id,
+                target=target_id,
+                type=type,
+                metadata=metadata or {}
+            )
+            success = self.graph.add_relation(relation)
+            if success:
+                logger.debug(f"Added relation: {source_id} -> {target_id} ({type})")
+                return True
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to add relation: {e}")
+            return False
+    
+    def search_entities(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        搜索实体
+        
+        Args:
+            query: 搜索词
+            limit: 最大返回数量
+            
+        Returns:
+            实体列表
+        """
+        if not self.graph:
+            return []
+        
+        try:
+            entities = self.graph.search_entities(query)
+            # 转换为字典
+            result = []
+            for entity in entities[:limit]:
+                result.append({
+                    "id": entity.id,
+                    "name": entity.name,
+                    "type": entity.type,
+                    "metadata": entity.metadata,
+                })
+            return result
+        except Exception as e:
+            logger.warning(f"Failed to search entities: {e}")
+            return []
     
     @staticmethod
     def _format_messages(messages: list[dict]) -> str:
