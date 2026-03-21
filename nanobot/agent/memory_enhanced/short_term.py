@@ -188,6 +188,14 @@ class ShortTermMemory:
             json.dumps(item.metadata)
         ))
         
+        # 同步写入标签关系表
+        if item.tags:
+            for tag in item.tags:
+                cursor.execute(
+                    "INSERT INTO memory_tags (memory_id, tag) VALUES (?, ?)",
+                    (item.id, tag)
+                )
+        
         self.conn.commit()
         
         
@@ -279,11 +287,25 @@ class ShortTermMemory:
         query_lower = query.lower()
         matches = []
         
+        # 如果有标签过滤，使用标签表快速筛选
+        if tags:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT memory_id FROM memory_tags 
+                WHERE tag IN ({})
+            """.format(','.join('?' * len(tags))), tags)
+            tag_memory_ids = {row[0] for row in cursor.fetchall()}
+        else:
+            tag_memory_ids = None
+        
         for item in items:
             # 内容匹配
             content_match = query_lower in item.content.lower()
             # 标签匹配 (如果指定了 tags)
-            tag_match = not tags or any(t in item.tags for t in tags)
+            if tag_memory_ids is not None:
+                tag_match = item.id in tag_memory_ids
+            else:
+                tag_match = any(t in item.tags for t in tags) if tags else True
             
             if content_match or tag_match:
                 # 更新访问统计
