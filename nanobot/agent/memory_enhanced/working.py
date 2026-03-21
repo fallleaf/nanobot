@@ -259,6 +259,10 @@ class WorkingMemory:
     def __len__(self) -> int:
         return len(self._items)
     
+    def count(self) -> int:
+        """获取工作记忆项数量"""
+        return len(self._items)
+    
     def __repr__(self) -> str:
         return f"WorkingMemory(items={len(self._items)}, capacity={self.capacity})"
 
