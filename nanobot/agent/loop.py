@@ -83,7 +83,7 @@ class AgentLoop:
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
 
-        self.context = ContextBuilder(workspace)
+        self.context = ContextBuilder(workspace, provider=provider, model=self.model)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
@@ -450,10 +450,38 @@ class AgentLoop:
                 current_message=msg.content, channel=channel, chat_id=chat_id,
                 current_role=current_role,
             )
+<<<<<<< HEAD
             final_content, _, all_msgs = await self._run_agent_loop(
                 messages, channel=channel, chat_id=chat_id,
                 message_id=msg.metadata.get("message_id"),
             )
+=======
+            
+            # 新增：编码系统消息到短期记忆
+            if hasattr(self.context, 'memory') and hasattr(self.context.memory, 'encode_message'):
+                self._schedule_background(
+                    self.context.memory.encode_message(
+                        content=msg.content,
+                        role=current_role,
+                        channel=channel,
+                        chat_id=chat_id,
+                    )
+                )
+            
+            final_content, _, all_msgs = await self._run_agent_loop(messages)
+            
+            # 新增：编码系统回复到短期记忆
+            if final_content and hasattr(self.context, 'memory') and hasattr(self.context.memory, 'encode_message'):
+                self._schedule_background(
+                    self.context.memory.encode_message(
+                        content=final_content,
+                        role="assistant",
+                        channel=channel,
+                        chat_id=chat_id,
+                    )
+                )
+            
+>>>>>>> ac9cb8b (feat: 集成增强记忆系统 (Enhanced Memory Integration))
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
             self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
@@ -487,6 +515,17 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id,
         )
 
+        # 新增：编码用户消息到短期记忆（不阻塞主流程）
+        if hasattr(self.context, 'memory') and hasattr(self.context.memory, 'encode_message'):
+            self._schedule_background(
+                self.context.memory.encode_message(
+                    content=msg.content,
+                    role="user",
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                )
+            )
+
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta = dict(msg.metadata or {})
             meta["_progress"] = True
@@ -506,6 +545,17 @@ class AgentLoop:
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
+
+        # 新增：编码助手回复到短期记忆（不阻塞主流程）
+        if hasattr(self.context, 'memory') and hasattr(self.context.memory, 'encode_message'):
+            self._schedule_background(
+                self.context.memory.encode_message(
+                    content=final_content,
+                    role="assistant",
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                )
+            )
 
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)

@@ -19,12 +19,22 @@ class ContextBuilder:
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
 
-    def __init__(self, workspace: Path):
+    def __init__(
+        self, 
+        workspace: Path,
+        provider: Any = None,
+        model: str = "qwen3.5-plus",
+    ):
         self.workspace = workspace
-        self.memory = MemoryStore(workspace)
+        self.memory = MemoryStore(workspace, provider=provider, model=model)
         self.skills = SkillsLoader(workspace)
+        self._last_query = ""  # 用于缓存最后一次查询，获取相关上下文
 
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    def build_system_prompt(
+        self, 
+        skill_names: list[str] | None = None,
+        include_enhanced_context: bool = True,
+    ) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         parts = [self._get_identity()]
 
@@ -32,9 +42,23 @@ class ContextBuilder:
         if bootstrap:
             parts.append(bootstrap)
 
+        # 原有长期记忆
         memory = self.memory.get_memory_context()
         if memory:
             parts.append(f"# Memory\n\n{memory}")
+        
+        # 新增：增强记忆上下文（短期记忆 + 工作记忆）
+        if include_enhanced_context and hasattr(self.memory, 'get_enhanced_context'):
+            try:
+                enhanced_context = self.memory.get_enhanced_context(
+                    query=self._last_query,
+                    limit=7
+                )
+                if enhanced_context:
+                    parts.append(f"# Enhanced Memory Context\n\n{enhanced_context}")
+            except Exception as e:
+                # 静默失败，不影响主流程
+                pass
 
         always_skills = self.skills.get_always_skills()
         if always_skills:
@@ -130,6 +154,9 @@ IMPORTANT: To send files (images, documents, audio, video) to the user, you MUST
         current_role: str = "user",
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
+        # 保存当前查询用于增强记忆检索
+        self._last_query = current_message[:200] if current_message else ""
+        
         runtime_ctx = self._build_runtime_context(channel, chat_id)
         user_content = self._build_user_content(current_message, media)
 

@@ -1,4 +1,4 @@
-"""Memory system for persistent agent memory."""
+"""Memory system for persistent agent memory - Enhanced with short-term storage."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 import weakref
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from loguru import logger
 
@@ -73,15 +73,84 @@ def _is_tool_choice_unsupported(content: str | None) -> bool:
 
 
 class MemoryStore:
-    """Two-layer memory: MEMORY.md (long-term facts) + HISTORY.md (grep-searchable log)."""
+    """Enhanced memory: MEMORY.md + HISTORY.md + SQLite short-term storage."""
 
     _MAX_FAILURES_BEFORE_RAW_ARCHIVE = 3
 
-    def __init__(self, workspace: Path):
+    def __init__(
+        self, 
+        workspace: Path,
+        provider: Optional[LLMProvider] = None,
+        model: str = "qwen3.5-plus",
+    ):
+        self.workspace = workspace
         self.memory_dir = ensure_dir(workspace / "memory")
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.history_file = self.memory_dir / "HISTORY.md"
         self._consecutive_failures = 0
+        
+        # 增强记忆：短期记忆和工作记忆
+        self.provider = provider
+        self.model = model
+        self.short_term = None
+        self.working = None
+        self.manager = None
+        self._enhanced_stats = {
+            "encoded_count": 0,
+            "consolidated_count": 0,
+        }
+        
+        # 尝试初始化增强记忆
+        self._init_enhanced_memory()
+    
+    def _init_enhanced_memory(self):
+        """初始化增强记忆系统"""
+        try:
+            from nanobot.agent.memory_enhanced.short_term import ShortTermMemory
+            from nanobot.agent.memory_enhanced.working import WorkingMemory
+            from nanobot.agent.memory_enhanced.manager import MemoryManager
+            
+            # 数据库路径：统一使用 memory/ 目录
+            db_path = self.memory_dir / "short_term_memory.db"
+            
+            # 如果 memory/ 目录数据库不存在，但 workspace 根目录有旧数据库，则迁移
+            if not db_path.exists():
+                old_db_path = self.workspace / "short_term_memory.db"
+                if old_db_path.exists():
+                    logger.info(f"Found legacy DB at {old_db_path}, migrating to {db_path}")
+                    import shutil
+                    shutil.copy2(old_db_path, db_path)
+                    logger.info(f"Migration complete, keeping legacy DB as backup")
+            
+            self.short_term = ShortTermMemory(
+                db_path=db_path,
+                capacity=500,
+                ttl_hours=24
+            )
+            
+            self.working = WorkingMemory(
+                capacity=9,
+                persistence_path=self.memory_dir / "working_memory.json"
+            )
+            
+            self.manager = MemoryManager(
+                working_memory=self.working,
+                short_term_memory=self.short_term,
+                consolidation_callback=self._on_enhanced_consolidate
+            )
+            
+            logger.info("Enhanced memory system initialized (SQLite + Working)")
+        except Exception as e:
+            logger.warning(f"Enhanced memory not available: {e}")
+            logger.warning("Falling back to standard file-based memory")
+    
+    def _on_enhanced_consolidate(self, summary: dict, items: list):
+        """增强记忆巩固回调 - 写入长期记忆"""
+        if summary and "summary" in summary:
+            entry = summary["summary"]
+            if entry:
+                self.append_history(f"[CONSOLIDATED] {entry}")
+                logger.info(f"Enhanced consolidation: {len(items)} items → HISTORY.md")
 
     def read_long_term(self) -> str:
         if self.memory_file.exists():
@@ -98,6 +167,162 @@ class MemoryStore:
     def get_memory_context(self) -> str:
         long_term = self.read_long_term()
         return f"## Long-term Memory\n{long_term}" if long_term else ""
+    
+    async def encode_message(
+        self,
+        content: str,
+        role: str,
+        channel: str = "telegram",
+        chat_id: str = "",
+        importance: Optional[float] = None,
+    ) -> dict:
+        """
+        编码消息到增强记忆系统
+        
+        Args:
+            content: 消息内容
+            role: user/assistant/tool
+            channel: 频道
+            chat_id: 聊天 ID
+            importance: 重要性 (0-1, 自动计算如果为 None)
+        
+        Returns:
+            编码结果
+        """
+        if not self.manager:
+            return {"success": False, "reason": "enhanced_memory_not_available"}
+        
+        try:
+            # 自动计算重要性
+            if importance is None:
+                importance = self._calculate_importance(content, role)
+            
+            # 编码到工作记忆和短期记忆
+            result = self.manager.encode(
+                content=content,
+                channel=f"{channel}_{chat_id}" if chat_id else channel,
+                role=role,
+                importance=importance,
+                add_to_working=True,
+                add_to_short_term=True
+            )
+            
+            self._enhanced_stats["encoded_count"] += 1
+            
+            # 检查是否需要自动巩固
+            await self._maybe_auto_consolidate()
+            
+            logger.debug(f"Encoded message to enhanced memory: role={role}, len={len(content)}")
+            return {"success": True, **result}
+            
+        except Exception as e:
+            logger.error(f"Failed to encode message: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def _calculate_importance(self, content: str, role: str) -> float:
+        """自动计算消息重要性"""
+        importance = 0.5  # 基础分数
+        
+        # 角色权重
+        if role == "user":
+            importance += 0.1
+        elif role == "assistant":
+            importance += 0.2
+        
+        # 关键词权重
+        important_keywords = ["配置", "决定", "重要", "必须", "记住", "注意", "config", "decision"]
+        for keyword in important_keywords:
+            if keyword in content.lower():
+                importance += 0.1
+        
+        # 问题权重
+        if "?" in content or "？" in content:
+            importance += 0.1
+        
+        # 长度权重
+        if len(content) > 50:
+            importance += 0.1
+        
+        return min(importance, 1.0)
+    
+    async def _maybe_auto_consolidate(self):
+        """检查是否需要自动巩固"""
+        if not self.short_term or not self.provider:
+            return
+        
+        stats = self.short_term.get_stats()
+        if stats["unconsolidated"] > 400:
+            await self.consolidate_enhanced_batch()
+    
+    async def consolidate_enhanced_batch(self, batch_size: int = 100):
+        """批量巩固增强记忆"""
+        if not self.provider or not self.manager:
+            return
+        
+        try:
+            from nanobot.agent.memory_enhanced.llm_consolidation import LLMMemoryConsolidator, consolidate_with_llm
+            
+            consolidator = LLMMemoryConsolidator(
+                llm_provider=self.provider,
+                model=self.model
+            )
+            
+            result = await consolidate_with_llm(
+                self.manager, consolidator, batch_size
+            )
+            
+            if result.get("consolidated"):
+                count = result.get("consolidated_count", 0)
+                self._enhanced_stats["consolidated_count"] += count
+                logger.info(f"Enhanced consolidation: {count} memories")
+        except Exception as e:
+            logger.error(f"Enhanced consolidation failed: {e}")
+    
+    def get_enhanced_context(self, query: str = "", limit: int = 7) -> str:
+        """
+        获取增强记忆上下文用于 prompt
+        
+        Args:
+            query: 当前查询 (用于搜索相关记忆)
+            limit: 工作记忆条数
+        
+        Returns:
+            格式化的上下文字符串
+        """
+        if not self.manager:
+            return ""
+        
+        try:
+            # 获取工作记忆上下文
+            context = self.manager.get_context(limit=limit)
+            
+            # 搜索相关记忆
+            if query and self.short_term:
+                search_results = self.manager.search(query, hours=24, limit=3)
+                if search_results:
+                    context += "\n\n## 相关记忆\n"
+                    for r in search_results:
+                        content = r.get("content", "")[:100]
+                        role = r.get("role", "?")
+                        context += f"- [{role}] {content}\n"
+            
+            return context if context else ""
+            
+        except Exception as e:
+            logger.warning(f"Failed to get enhanced context: {e}")
+            return ""
+    
+    def get_enhanced_stats(self) -> dict:
+        """获取增强记忆统计信息"""
+        if not self.manager:
+            return {"available": False}
+        
+        return {
+            "available": True,
+            "working": self.working.get_stats() if self.working else {},
+            "short_term": self.short_term.get_stats() if self.short_term else {},
+            "stats": self._enhanced_stats,
+        }
 
     @staticmethod
     def _format_messages(messages: list[dict]) -> str:
@@ -261,7 +486,7 @@ class MemoryConsolidator:
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
         max_completion_tokens: int = 4096,
     ):
-        self.store = MemoryStore(workspace)
+        self.store = MemoryStore(workspace, provider=provider, model=model)
         self.provider = provider
         self.model = model
         self.sessions = sessions
