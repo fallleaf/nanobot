@@ -8,7 +8,7 @@ Short-term Memory Module
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timedelta
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 import json
@@ -426,6 +426,122 @@ class ShortTermMemory:
         # 获取所有记忆项
         cursor.execute("SELECT * FROM memory_items ORDER BY timestamp ASC")
         rows = cursor.fetchall()
+        
+        deleted_count = 0
+        now = datetime.now()
+        
+        for row in rows:
+            item = ShortTermMemoryItem.from_dict(dict(row))
+            
+            # 计算年龄 (小时)
+            age_hours = (now - item.timestamp).total_seconds() / 3600
+            
+            # 删除策略:
+            # 1. 超过 TTL 的直接删除
+            # 2. 超过 7 天且访问次数为 0 的删除
+            # 3. 超过 30 天的全部删除
+            
+            should_delete = False
+            
+            if age_hours > self.ttl_hours:
+                should_delete = True
+            elif age_hours > 168 and item.access_count == 0:  # 7 天
+                should_delete = True
+            elif age_hours > 720:  # 30 天
+                should_delete = True
+            
+            if should_delete:
+                self.delete(item.id)
+                deleted_count += 1
+        
+        return deleted_count
+    
+    def cleanup_low_importance(self, threshold: float = 0.6, days: int = 7) -> int:
+        """
+        清理低重要性记忆
+        
+        Args:
+            threshold: 重要性阈值
+            days: 多少天前的记忆
+            
+        Returns:
+            删除的数量
+        """
+        cursor = self.conn.cursor()
+        
+        # 查询低重要性且未巩固的记忆
+        cutoff_date = (datetime.now() - timedelta(days=days)).isoformat()
+        
+        cursor.execute("""
+            SELECT id FROM memory_items 
+            WHERE timestamp < ? 
+            AND consolidated = 0
+            AND access_count = 0
+        """, (cutoff_date,))
+        
+        rows = cursor.fetchall()
+        deleted_count = 0
+        
+        for (item_id,) in rows:
+            self.delete(item_id)
+            deleted_count += 1
+        
+        return deleted_count
+    
+    def get_cleanup_stats(self) -> Dict[str, Any]:
+        """
+        获取清理统计信息
+        
+        Returns:
+            清理建议统计
+        """
+        cursor = self.conn.cursor()
+        now = datetime.now()
+        
+        # 统计不同时间段的记忆数量
+        stats = {
+            "total": self.count(),
+            "older_than_7_days": 0,
+            "older_than_30_days": 0,
+            "zero_access": 0,
+            "consolidated": 0,
+            "database_size_kb": 0,
+        }
+        
+        # 获取所有记忆
+        cursor.execute("SELECT timestamp, access_count, consolidated FROM memory_items")
+        for row in cursor.fetchall():
+            timestamp = datetime.fromisoformat(row[0])
+            age_days = (now - timestamp).total_seconds() / 86400
+            
+            if age_days > 7:
+                stats["older_than_7_days"] += 1
+            if age_days > 30:
+                stats["older_than_30_days"] += 1
+            if row[1] == 0:
+                stats["zero_access"] += 1
+            if row[2] == 1:
+                stats["consolidated"] += 1
+        
+        # 数据库大小
+        db_path = self.db_path
+        if db_path.exists():
+            stats["database_size_kb"] = round(db_path.stat().st_size / 1024, 2)
+        
+        # 清理建议
+        stats["cleanup_recommendation"] = {
+            "should_cleanup": stats["older_than_30_days"] > 100 or stats["database_size_kb"] > 1024,
+            "reason": [],
+        }
+        
+        if stats["older_than_30_days"] > 100:
+            stats["cleanup_recommendation"]["reason"].append(f"30 天前的记忆过多 ({stats['older_than_30_days']}条)")
+        if stats["database_size_kb"] > 1024:
+            stats["cleanup_recommendation"]["reason"].append(f"数据库过大 ({stats['database_size_kb']}KB)")
+        if stats["zero_access"] > stats["total"] * 0.5:
+            stats["cleanup_recommendation"]["reason"].append(f"半数记忆未访问 ({stats['zero_access']}条)")
+        
+        return stats
         
         to_delete = []
         now = datetime.now()
