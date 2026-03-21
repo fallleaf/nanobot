@@ -131,7 +131,7 @@ class ShortTermMemory:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_consolidated ON memory_items(consolidated)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_access_count ON memory_items(access_count)")
         
-        self.self.conn.commit()
+        self.conn.commit()
     
     def add(
         self,
@@ -368,6 +368,13 @@ class ShortTermMemory:
         
         
         return count
+    
+    def count(self) -> int:
+        """获取记忆项总数"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM memory_items")
+        result = cursor.fetchone()
+        return result[0] if result else 0
     
     def delete(self, item_id: str) -> bool:
         """删除记忆项"""

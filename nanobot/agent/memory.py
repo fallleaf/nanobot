@@ -100,6 +100,10 @@ class MemoryStore:
             "consolidated_count": 0,
         }
         
+        # 统计缓存
+        self._stats_cache = {}
+        self._stats_cache_time = 0
+        
         # 尝试初始化增强记忆
         self._init_enhanced_memory()
     
@@ -414,18 +418,142 @@ class MemoryStore:
         
         return tags[:3]  # 限制最多 3 个标签
     
-    def get_enhanced_stats(self) -> dict:
-        """获取增强记忆统计信息"""
-        if not self.manager:
-            return {"available": False}
+    def get_enhanced_stats(self, force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        获取增强记忆统计信息
         
-        return {
-            "available": True,
-            "working": self.working.get_stats() if self.working else {},
-            "short_term": self.short_term.get_stats() if self.short_term else {},
-            "stats": self._enhanced_stats,
-        }
-
+        Args:
+            force_refresh: 强制刷新缓存
+            
+        Returns:
+            统计信息字典
+        """
+        import time
+        from pathlib import Path
+        
+        # 使用缓存 (5 秒内不刷新)
+        current_time = time.time()
+        if not force_refresh and (current_time - self._stats_cache_time) < 5:
+            return self._stats_cache
+        
+        if not self.manager:
+            return {"error": "enhanced_memory_not_available"}
+        
+        try:
+            # 短期记忆统计
+            short_term_count = self.short_term.count() if self.short_term else 0
+            
+            # 工作记忆统计
+            working_count = self.working.count() if self.working else 0
+            
+            # 标签分布统计
+            tags_distribution = self._get_tags_distribution()
+            
+            # 角色分布
+            role_distribution = self._get_role_distribution()
+            
+            # 数据库大小
+            db_path = self.memory_dir / "short_term_memory.db"
+            db_size = db_path.stat().st_size if db_path.exists() else 0
+            
+            # 巩固统计
+            consolidated_count = self._get_consolidated_count()
+            
+            stats = {
+                "short_term_count": short_term_count,
+                "working_count": working_count,
+                "tags_distribution": tags_distribution,
+                "role_distribution": role_distribution,
+                "database_size_bytes": db_size,
+                "database_size_kb": round(db_size / 1024, 2),
+                "consolidated_count": consolidated_count,
+                "unconsolidated_count": short_term_count - consolidated_count,
+            }
+            
+            # 更新缓存
+            self._stats_cache = stats
+            self._stats_cache_time = current_time
+            
+            return stats
+            
+        except Exception as e:
+            logger.warning(f"Failed to get enhanced stats: {e}")
+            return {"error": str(e)}
+    
+    def _get_tags_distribution(self) -> Dict[str, int]:
+        """获取标签分布统计"""
+        if not self.short_term:
+            return {}
+        
+        try:
+            import sqlite3
+            db_path = self.memory_dir / "short_term_memory.db"
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+            
+            # 查询所有标签
+            cursor.execute("SELECT tags FROM memory_items WHERE tags != '[]'")
+            rows = cursor.fetchall()
+            conn.close()
+            
+            # 统计标签频率
+            tag_counts = {}
+            import json
+            for (tags_json,) in rows:
+                tags = json.loads(tags_json)
+                for tag in tags:
+                    tag_counts[tag] = tag_counts.get(tag, 0) + 1
+            
+            # 按频率排序
+            sorted_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)
+            return dict(sorted_tags[:20])  # 返回前 20 个标签
+            
+        except Exception as e:
+            logger.warning(f"Failed to get tags distribution: {e}")
+            return {}
+    
+    def _get_role_distribution(self) -> Dict[str, int]:
+        """获取角色分布统计"""
+        if not self.short_term:
+            return {}
+        
+        try:
+            import sqlite3
+            db_path = self.memory_dir / "short_term_memory.db"
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT role, COUNT(*) FROM memory_items GROUP BY role")
+            rows = cursor.fetchall()
+            conn.close()
+            
+            return {role: count for role, count in rows}
+            
+        except Exception as e:
+            logger.warning(f"Failed to get role distribution: {e}")
+            return {}
+    
+    def _get_consolidated_count(self) -> int:
+        """获取已巩固的记忆数量"""
+        if not self.short_term:
+            return 0
+        
+        try:
+            import sqlite3
+            db_path = self.memory_dir / "short_term_memory.db"
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT COUNT(*) FROM memory_items WHERE consolidated = 1")
+            result = cursor.fetchone()
+            conn.close()
+            
+            return result[0] if result else 0
+            
+        except Exception as e:
+            logger.warning(f"Failed to get consolidated count: {e}")
+            return 0
+    
     @staticmethod
     def _format_messages(messages: list[dict]) -> str:
         lines = []
