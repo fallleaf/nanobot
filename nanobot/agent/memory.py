@@ -201,20 +201,29 @@ class MemoryStore:
         Returns:
             编码结果
         """
+        # 🎯 添加详细日志
+        logger.info(f"💾 [DEBUG] encode_message 被调用")
+        logger.info(f"💾 [DEBUG] role={role}, channel={channel}, len={len(content)}")
+        logger.info(f"💾 [DEBUG] content preview: '{content[:100]}...'")
+        
         if not self.manager:
+            logger.warning("⚠️  [DEBUG] MemoryManager 不存在，无法编码")
             return {"success": False, "reason": "enhanced_memory_not_available"}
         
         try:
             # 自动计算重要性
             if importance is None:
                 importance = self._calculate_importance(content, role)
+                logger.info(f"📊 [DEBUG] 计算重要性：{importance:.2f}")
             
             # 自动提取标签
             tags = []
             if auto_extract_tags:
                 tags = self._extract_tags(content, role)
+                logger.info(f"🏷️  [DEBUG] 提取标签：{tags}")
             
             # 编码到工作记忆和短期记忆
+            logger.info(f"📝 [DEBUG] 编码到短期记忆数据库...")
             result = self.manager.encode(
                 content=content,
                 channel=f"{channel}_{chat_id}" if chat_id else channel,
@@ -227,14 +236,16 @@ class MemoryStore:
             
             self._enhanced_stats["encoded_count"] += 1
             
+            logger.info(f"✅ [DEBUG] 编码成功：working={result.get('working_count', '?')}, short_term={result.get('short_term_count', '?')}")
+            
             # 检查是否需要自动巩固
             await self._maybe_auto_consolidate()
             
-            logger.debug(f"Encoded message to enhanced memory: role={role}, len={len(content)}")
+            logger.info(f"✅ [DEBUG] encode_message 完成")
             return {"success": True, **result}
             
         except Exception as e:
-            logger.error(f"Failed to encode message: {e}")
+            logger.error(f"❌ [DEBUG] encode_message 失败：{e}")
             return {"success": False, "error": str(e)}
     
     def _calculate_importance(self, content: str, role: str) -> float:
@@ -357,20 +368,31 @@ class MemoryStore:
         Returns:
             格式化的上下文字符串
         """
+        # 🎯 添加详细日志用于调试
+        logger.info(f"🔍 [DEBUG] get_enhanced_context 被调用")
+        logger.info(f"🔍 [DEBUG] query='{query[:50]}...' limit={limit}")
+        
         if not self.manager:
+            logger.warning("⚠️  [DEBUG] MemoryManager 不存在，返回空上下文")
             return ""
         
         try:
             # 获取工作记忆上下文
+            logger.info(f"📖 [DEBUG] 获取工作记忆 (limit={limit})")
             context = self.manager.get_context(limit=limit)
+            logger.info(f"📖 [DEBUG] 工作记忆大小：{len(context)} chars")
             
             # 搜索相关记忆
             if query and self.short_term:
+                logger.info(f"🔍 [DEBUG] 查询短期记忆数据库：query='{query[:50]}...'")
+                
                 # 从查询中提取相关标签
                 relevant_tags = self._extract_query_tags(query)
+                logger.info(f"🏷️  [DEBUG] 提取的标签：{relevant_tags}")
                 
                 # 优先按标签搜索，其次按关键词搜索
                 if relevant_tags:
+                    logger.info(f"🔍 [DEBUG] 按标签搜索：tags={relevant_tags}")
                     search_results = self.manager.search(
                         query=query,
                         tags=relevant_tags,
@@ -378,7 +400,10 @@ class MemoryStore:
                         limit=3
                     )
                 else:
+                    logger.info(f"🔍 [DEBUG] 按关键词搜索：query='{query}'")
                     search_results = self.manager.search(query, hours=24, limit=3)
+                
+                logger.info(f"📊 [DEBUG] 搜索结果：{len(search_results)} 条")
                 
                 if search_results:
                     context += "\n\n## 相关记忆\n"
@@ -388,10 +413,21 @@ class MemoryStore:
                         tags = r.get("tags", [])
                         tag_str = f" [{', '.join(tags)}]" if tags else ""
                         context += f"- [{role}]{tag_str} {content}\n"
+                    logger.info(f"✅ [DEBUG] 已添加 {len(search_results)} 条相关记忆到上下文")
+                else:
+                    logger.info("⚠️  [DEBUG] 未找到相关记忆")
+            else:
+                if not query:
+                    logger.info("ℹ️  [DEBUG] 无查询词，跳过相关记忆搜索")
+                if not self.short_term:
+                    logger.info("ℹ️  [DEBUG] 短期记忆未初始化，跳过搜索")
             
+            total_len = len(context) if context else 0
+            logger.info(f"✅ [DEBUG] get_enhanced_context 完成，返回 {total_len} chars")
             return context if context else ""
             
         except Exception as e:
+            logger.error(f"❌ [DEBUG] get_enhanced_context 失败：{e}")
             logger.warning(f"Failed to get enhanced context: {e}")
             return ""
     
