@@ -692,6 +692,194 @@ class MemoryStore:
             logger.warning(f"Failed to search entities: {e}")
             return []
     
+    def export_memories(
+        self,
+        format: str = "json",
+        output_path: Optional[Path] = None,
+        tags: Optional[List[str]] = None,
+        days: int = 30
+    ) -> Optional[str]:
+        """
+        导出记忆
+        
+        Args:
+            format: 导出格式 (json/markdown)
+            output_path: 输出路径 (可选)
+            tags: 标签过滤
+            days: 最近 N 天
+            
+        Returns:
+            导出的内容 (如果未指定 output_path)
+        """
+        import json
+        from datetime import datetime, timedelta
+        
+        try:
+            if not self.short_term:
+                return None
+            
+            # 查询记忆
+            import sqlite3
+            db_path = self.memory_dir / "short_term_memory.db"
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cutoff_date = (datetime.now() - timedelta(days=days)).isoformat()
+            
+            if tags:
+                # 使用标签表过滤
+                cursor.execute("""
+                    SELECT DISTINCT m.* FROM memory_items m
+                    JOIN memory_tags t ON m.id = t.memory_id
+                    WHERE m.timestamp > ? AND t.tag IN ({})
+                    ORDER BY m.timestamp DESC
+                """.format(','.join('?' * len(tags))), [cutoff_date] + list(tags))
+            else:
+                cursor.execute("""
+                    SELECT * FROM memory_items
+                    WHERE timestamp > ?
+                    ORDER BY timestamp DESC
+                """, (cutoff_date,))
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            # 转换为字典
+            memories = []
+            for row in rows:
+                memories.append({
+                    "id": row["id"],
+                    "content": row["content"],
+                    "role": row["role"],
+                    "channel": row["channel"],
+                    "timestamp": row["timestamp"],
+                    "tags": json.loads(row["tags"] or "[]"),
+                    "access_count": row["access_count"],
+                })
+            
+            if format.lower() == "json":
+                content = json.dumps(memories, ensure_ascii=False, indent=2)
+            elif format.lower() == "markdown":
+                content = self._format_memories_as_markdown(memories)
+            else:
+                raise ValueError(f"Unsupported format: {format}")
+            
+            if output_path:
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                logger.info(f"Exported {len(memories)} memories to {output_path}")
+                return str(output_path)
+            else:
+                return content
+            
+        except Exception as e:
+            logger.warning(f"Failed to export memories: {e}")
+            return None
+    
+    def _format_memories_as_markdown(self, memories: List[Dict[str, Any]]) -> str:
+        """格式化记忆为 Markdown"""
+        lines = ["# 记忆导出\n", f"导出时间：{datetime.now().isoformat()}\n", f"数量：{len(memories)} 条\n", "---\n"]
+        
+        for mem in memories:
+            timestamp = mem["timestamp"][:19].replace('T', ' ')
+            role = mem["role"]
+            content = mem["content"]
+            tags = ", ".join(mem.get("tags", []))
+            
+            lines.append(f"\n## [{role}] {timestamp}\n")
+            lines.append(f"{content}\n")
+            if tags:
+                lines.append(f"**标签**: {tags}\n")
+            lines.append("---\n")
+        
+        return "\n".join(lines)
+    
+    def backup_database(self, backup_path: Optional[Path] = None) -> Optional[str]:
+        """
+        备份数据库
+        
+        Args:
+            backup_path: 备份路径 (可选，默认在 memory/backup/)
+            
+        Returns:
+            备份文件路径
+        """
+        import shutil
+        from datetime import datetime
+        
+        try:
+            db_path = self.memory_dir / "short_term_memory.db"
+            
+            if not db_path.exists():
+                logger.warning("Database not found for backup")
+                return None
+            
+            if backup_path is None:
+                # 默认备份到 memory/backup/
+                backup_dir = self.memory_dir / "backup"
+                backup_dir.mkdir(exist_ok=True)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_path = backup_dir / f"short_term_memory_{timestamp}.db"
+            
+            # 复制数据库文件
+            shutil.copy2(db_path, backup_path)
+            
+            # 如果有 WAL 文件，也复制
+            wal_path = db_path.with_suffix('.db-wal')
+            if wal_path.exists():
+                shutil.copy2(wal_path, backup_path.with_suffix('.db-wal'))
+            
+            shm_path = db_path.with_suffix('.db-shm')
+            if shm_path.exists():
+                shutil.copy2(shm_path, backup_path.with_suffix('.db-shm'))
+            
+            logger.info(f"Database backed up to {backup_path}")
+            return str(backup_path)
+            
+        except Exception as e:
+            logger.warning(f"Failed to backup database: {e}")
+            return None
+    
+    def import_memories(self, file_path: str) -> int:
+        """
+        导入记忆
+        
+        Args:
+            file_path: JSON 文件路径
+            
+        Returns:
+            导入的记忆数量
+        """
+        import json
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                memories = json.load(f)
+            
+            if not isinstance(memories, list):
+                logger.warning("Invalid import file format")
+                return 0
+            
+            imported_count = 0
+            for mem in memories:
+                # 添加到短期记忆
+                self.short_term.add(
+                    content=mem.get("content", ""),
+                    channel=mem.get("channel", "imported"),
+                    role=mem.get("role", "user"),
+                    tags=mem.get("tags", []),
+                    timestamp=datetime.fromisoformat(mem.get("timestamp", datetime.now().isoformat())),
+                )
+                imported_count += 1
+            
+            logger.info(f"Imported {imported_count} memories from {file_path}")
+            return imported_count
+            
+        except Exception as e:
+            logger.warning(f"Failed to import memories: {e}")
+            return 0
+    
     @staticmethod
     def _format_messages(messages: list[dict]) -> str:
         lines = []
