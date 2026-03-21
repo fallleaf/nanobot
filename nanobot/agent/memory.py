@@ -122,16 +122,50 @@ class MemoryStore:
             return True
 
         current_memory = self.read_long_term()
-        prompt = f"""Process this conversation and call the save_memory tool with your consolidation.
+        prompt = f"""You are a memory consolidation agent. Extract structured, searchable memories from this conversation.
+
+## Extraction Guidelines
+
+Extract and organize the following:
+
+1. **Facts**: User preferences, decisions, project details, technical configurations
+2. **Events**: What happened, when, who was involved, outcomes
+3. **Tasks**: Action items, deadlines, priorities, status
+4. **Relationships**: People mentioned, their roles, contact info
+5. **Knowledge**: Technical insights, solutions, references
+
+## Output Format
+
+For `memory_update`, use structured markdown with frontmatter:
+
+```markdown
+## Category (e.g., Projects, Config, People, Decisions)
+
+### Item Name
+---
+type: fact|event|task|decision
+date: YYYY-MM-DD
+tags: [tag1, tag2]
+related: [related items]
+---
+Detailed content with context. Be specific for future grep search.
+```
+
+For `history_entry`, write a searchable paragraph:
+- Start with [YYYY-MM-DD HH:MM]
+- Include key details: who, what, when, outcome
+- Use keywords likely to be searched later
 
 ## Current Long-term Memory
 {current_memory or "(empty)"}
 
 ## Conversation to Process
-{self._format_messages(messages)}"""
+{self._format_messages(messages)}
+
+Call save_memory tool with your consolidation now."""
 
         chat_messages = [
-            {"role": "system", "content": "You are a memory consolidation agent. Call the save_memory tool with your consolidation of the conversation."},
+            {"role": "system", "content": "You are a memory consolidation agent. Extract structured, searchable memories from conversations. Call save_memory tool with your consolidation."},
             {"role": "user", "content": prompt},
         ]
 
