@@ -1,11 +1,14 @@
 """LiteLLM provider implementation for multi-provider support."""
 
+import asyncio
 import hashlib
 import os
 import secrets
 import string
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
+from collections import deque
 
 import json_repair
 import litellm
@@ -41,29 +44,44 @@ class LiteLLMProvider(LLMProvider):
         default_model: str = "anthropic/claude-opus-4-5",
         extra_headers: dict[str, str] | None = None,
         provider_name: str | None = None,
+        rate_limit: dict[str, Any] | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
-
+        self.rate_limit = rate_limit or {}
+        
+        # Rate limit configuration
+        self.rpm_limit = self.rate_limit.get("rpm", None)  # Requests per minute
+        self.tpm_limit = self.rate_limit.get("tpm", None)  # Tokens per minute
+        self.backoff_multiplier = self.rate_limit.get("backoffMultiplier", 1.5)
+        self.max_retries = self.rate_limit.get("maxRetries", 3)
+        
+        # Rate limit tracking
+        self._request_times: deque = deque()
+        self._token_counts: deque = deque()
+        
         # Detect gateway / local deployment.
         # provider_name (from config key) is the primary signal;
         # api_key / api_base are fallback for auto-detection.
         self._gateway = find_gateway(provider_name, api_key, api_base)
-
+        
         # Configure environment variables
         if api_key:
             self._setup_env(api_key, api_base, default_model)
-
+        
         if api_base:
             litellm.api_base = api_base
-
+        
         # Disable LiteLLM logging noise
         litellm.suppress_debug_info = True
         # Drop unsupported parameters for providers (e.g., gpt-5 rejects some params)
         litellm.drop_params = True
-
+        
         self._langsmith_enabled = bool(os.getenv("LANGSMITH_API_KEY"))
+        
+        if self.rpm_limit:
+            logger.info(f"⚡ Rate limit configured: {self.rpm_limit} RPM, {self.tpm_limit or '∞'} TPM")
 
     def _setup_env(self, api_key: str, api_base: str | None, model: str) -> None:
         """Set environment variables based on detected provider."""
@@ -292,19 +310,79 @@ class LiteLLMProvider(LLMProvider):
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
-        """Send a chat completion request via LiteLLM."""
-        kwargs, _ = self._build_chat_kwargs(
-            messages, tools, model, max_tokens, temperature,
-            reasoning_effort, tool_choice,
+        """Send a chat completion request via LiteLLM with rate limiting support."""
+        original_model = model or self.default_model
+        model = self._resolve_model(original_model)
+        extra_msg_keys = self._extra_msg_keys(original_model, model)
+
+        if self._supports_cache_control(original_model):
+            messages, tools = self._apply_cache_control(messages, tools)
+
+        max_tokens = max(1, max_tokens)
+
+        # Rate limiting: wait if necessary
+        if self.rpm_limit or self.tpm_limit:
+            await self._wait_for_rate_limit()
+
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": self._sanitize_messages(self._sanitize_empty_content(messages), extra_keys=extra_msg_keys),
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+
+        if self._gateway:
+            kwargs.update(self._gateway.litellm_kwargs)
+
+        self._apply_model_overrides(model, kwargs)
+
+        if self._langsmith_enabled:
+            kwargs.setdefault("callbacks", []).append("langsmith")
+
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+        if self.api_base:
+            kwargs["api_base"] = self.api_base
+        if self.extra_headers:
+            kwargs["extra_headers"] = self.extra_headers
+
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+        kwargs["drop_params"] = True
+
+        if tools:
+            kwargs["tools"] = tools
+        kwargs["tool_choice"] = tool_choice or "auto"
+
+        # Retry logic for rate limit errors
+        retries = 0
+        while retries <= self.max_retries:
+            try:
+                response = await acompletion(**kwargs)
+                # Track successful request
+                if self.rpm_limit:
+                    self._track_request(max_tokens)
+                return self._parse_response(response)
+            except Exception as e:
+                error_msg = str(e).lower()
+                # Check for rate limit error
+                if ("rate limit" in error_msg or "429" in str(e)) and retries < self.max_retries:
+                    retries += 1
+                    wait_time = (2 ** retries) * self.backoff_multiplier
+                    logger.warning(f"⚠️ Rate limit hit, retrying in {wait_time:.1f}s (attempt {retries}/{self.max_retries})")
+                    await asyncio.sleep(wait_time)
+                else:
+                    # Return error as content for graceful handling
+                    return LLMResponse(
+                        content=f"Error calling LLM: {str(e)}",
+                        finish_reason="error",
+                    )
+
+        # Max retries exceeded
+        return LLMResponse(
+            content=f"Rate limit exceeded after {self.max_retries} retries",
+            finish_reason="rate_limit_exceeded",
         )
-        try:
-            response = await acompletion(**kwargs)
-            return self._parse_response(response)
-        except Exception as e:
-            return LLMResponse(
-                content=f"Error calling LLM: {str(e)}",
-                finish_reason="error",
-            )
 
     async def chat_stream(
         self,
@@ -317,11 +395,50 @@ class LiteLLMProvider(LLMProvider):
         tool_choice: str | dict[str, Any] | None = None,
         on_content_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
-        """Stream a chat completion via LiteLLM, forwarding text deltas."""
-        kwargs, _ = self._build_chat_kwargs(
-            messages, tools, model, max_tokens, temperature,
-            reasoning_effort, tool_choice,
-        )
+        """Stream a chat completion via LiteLLM with rate limiting support."""
+        original_model = model or self.default_model
+        model = self._resolve_model(original_model)
+        extra_msg_keys = self._extra_msg_keys(original_model, model)
+
+        if self._supports_cache_control(original_model):
+            messages, tools = self._apply_cache_control(messages, tools)
+
+        max_tokens = max(1, max_tokens)
+
+        # Rate limiting: wait if necessary
+        if self.rpm_limit or self.tpm_limit:
+            await self._wait_for_rate_limit()
+
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": self._sanitize_messages(self._sanitize_empty_content(messages), extra_keys=extra_msg_keys),
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+
+        if self._gateway:
+            kwargs.update(self._gateway.litellm_kwargs)
+
+        self._apply_model_overrides(model, kwargs)
+
+        if self._langsmith_enabled:
+            kwargs.setdefault("callbacks", []).append("langsmith")
+
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+        if self.api_base:
+            kwargs["api_base"] = self.api_base
+        if self.extra_headers:
+            kwargs["extra_headers"] = self.extra_headers
+
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+        kwargs["drop_params"] = True
+
+        if tools:
+            kwargs["tools"] = tools
+        kwargs["tool_choice"] = tool_choice or "auto"
+
         kwargs["stream"] = True
 
         try:
@@ -338,6 +455,11 @@ class LiteLLMProvider(LLMProvider):
             full_response = litellm.stream_chunk_builder(
                 chunks, messages=kwargs["messages"],
             )
+            # Track successful request
+            if self.rpm_limit:
+                # Estimate tokens from chunks (simplified)
+                total_tokens = sum(len(str(c).split()) for c in chunks) * 4  # rough estimate
+                self._track_request(total_tokens)
             return self._parse_response(full_response)
         except Exception as e:
             return LLMResponse(

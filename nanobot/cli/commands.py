@@ -425,13 +425,19 @@ def _make_provider(config: Config):
             console.print("[red]Error: No API key configured.[/red]")
             console.print("Set one in ~/.nanobot/config.json under providers section")
             raise typer.Exit(1)
-        provider = LiteLLMProvider(
-            api_key=p.api_key if p else None,
-            api_base=config.get_api_base(model),
-            default_model=model,
-            extra_headers=p.extra_headers if p else None,
-            provider_name=provider_name,
-        )
+    # Get rate limit config from defaults
+    rate_limit = None
+    if hasattr(config.agents.defaults, 'rate_limit') and config.agents.defaults.rate_limit:
+        rate_limit = config.agents.defaults.rate_limit
+    
+    provider = LiteLLMProvider(
+        api_key=p.api_key if p else None,
+        api_base=config.get_api_base(model),
+        default_model=model,
+        extra_headers=p.extra_headers if p else None,
+        provider_name=provider_name,
+        rate_limit=rate_limit,
+    )
 
     defaults = config.agents.defaults
     provider.generation = GenerationSettings(

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import Literal
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
@@ -40,6 +41,7 @@ class AgentDefaults(Base):
     temperature: float = 0.1
     max_tool_iterations: int = 40
     reasoning_effort: str | None = None  # low / medium / high - enables LLM thinking mode
+    rate_limit: dict[str, Any] | None = None  # Rate limiting: {"rpm": 40, "tpm": null, "backoffMultiplier": 1.5, "maxRetries": 3}
 
 
 class AgentsConfig(Base):
