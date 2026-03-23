@@ -94,36 +94,47 @@ class ShortTermMemory:
         # 确保目录存在
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # 初始化数据库
-        self._init_db()
-    
+    # 初始化数据库
+    self._init_db()
+
     def _init_db(self) -> None:
         """初始化数据库表"""
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
-        
-        # 创建表
+
+        # 创建 memory_items 表
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS memory_items (
-                id TEXT PRIMARY KEY,
-                content TEXT NOT NULL,
-                channel TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                role TEXT NOT NULL,
-                tags TEXT,
-                access_count INTEGER DEFAULT 0,
-                last_access TEXT,
-                consolidated INTEGER DEFAULT 0,
-                metadata TEXT
-            )
+        CREATE TABLE IF NOT EXISTS memory_items (
+        id TEXT PRIMARY KEY,
+        content TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        role TEXT NOT NULL,
+        tags TEXT,
+        access_count INTEGER DEFAULT 0,
+        last_access TEXT,
+        consolidated INTEGER DEFAULT 0,
+        metadata TEXT
+        )
         """)
-        
+
+        # 创建 memory_tags 表 (标签关系表)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS memory_tags (
+        memory_id TEXT NOT NULL,
+        tag TEXT NOT NULL,
+        FOREIGN KEY (memory_id) REFERENCES memory_items(id) ON DELETE CASCADE
+        )
+        """)
+
         # 创建索引
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON memory_items(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel ON memory_items(channel)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_consolidated ON memory_items(consolidated)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_access_count ON memory_items(access_count)")
-        
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tag ON memory_tags(tag)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_id ON memory_tags(memory_id)")
+
         conn.commit()
         conn.close()
     
@@ -175,11 +186,11 @@ class ShortTermMemory:
             item.channel,
             item.timestamp.isoformat(),
             item.role,
-            json.dumps(item.tags),
+            json.dumps(item.tags, ensure_ascii=False),
             item.access_count,
             item.last_access.isoformat() if item.last_access else None,
             1 if item.consolidated else 0,
-            json.dumps(item.metadata)
+            json.dumps(item.metadata, ensure_ascii=False)
         ))
         
         conn.commit()
