@@ -450,12 +450,12 @@ class AgentLoop:
                 current_message=msg.content, channel=channel, chat_id=chat_id,
                 current_role=current_role,
             )
-<<<<<<< HEAD
+
             final_content, _, all_msgs = await self._run_agent_loop(
                 messages, channel=channel, chat_id=chat_id,
                 message_id=msg.metadata.get("message_id"),
             )
-=======
+
             
             # 新增：编码系统消息到短期记忆
             if hasattr(self.context, 'memory') and hasattr(self.context.memory, 'encode_message'):
